@@ -1,0 +1,150 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{docId=**} { // =** cascade to subcollections
+      // allow <what> <under what conditions?>
+      // during runtime, firestore looks for the first `allow`
+      // once it is allowed, it cannot be unallowed somewhere else.
+
+      allow read: if docId == 'something';
+    
+
+      allow write; // most broad
+
+
+      // more granular
+      allow get; // single document
+      allow list; // collection of documents
+
+      allow create, update, delete;
+
+      allow create: if a && b && c || d; // chaining possible.
+
+      match /items/{itemId} {
+
+      }
+
+      // request : incoming data
+      // if a user is trying to read/write something, 
+      // browser need to authenticate the user
+      // request.auth: current user info(JSON Web Token)
+      // request.resource: data payload that user is trying to write to db
+      // request.time : timestamp
+      // request.path : path to the document
+      // request.method : read/create/delete/etc
+
+
+      // resource : existing data
+      // resource != request.resource
+    }
+
+
+    // Has-one collection
+    match /users/{userId} {
+      allow read: if isLoggedIn(); // is the user logged in?
+      allow write: if belongsTo(userId);
+    }
+
+    // Has-many collection
+    match /todos/{docId} {
+      allow create: if canCreateTodo();
+
+      allow read: if isLoggedIn() 
+                  && hasProfile(request.auth.uid) // must have profile
+                  && resource.data.status == 'published'; 
+
+      allow update: if belongsTo(docId)
+                    && request.resource.data.keys().hasOnly(['text', 'status']);
+    }
+
+    match /banned/{userId} {
+      allow write: if isAdmin(request.auth.uid); // must be admin
+      allow delete: if isAdmin(request.auth.uid);
+    }
+
+
+    // Chat application 
+    match /{document=**} {
+      allow read, write: if false; // lock down all documents to control rules separately
+    }
+
+    match /messages/{docId} {
+      allow read: if isLoggedIn();
+      allow create: if canCreateMsg();
+    }
+    
+    // Role-based Auth
+    match /users/{userId} {
+      allow read: if isLoggedIn();
+      allow update, delete: if hasAnyRole(['admin']);
+    }
+
+    match /posts/{postId} {
+      allow read: if (isLoggedIn() && resource.data.published == 'true') || hasAnyRole(['admin']);
+      allow create: if isValidNewPost() && hasAnyRole(['author']);
+      allow update: if isValidUpdatedPost() && hasAnyRole(['author', 'editor', 'admin']);
+      allow delete: if hasAnyRole(['admin']);
+    }
+
+    function isValidNewPost() {
+      let post = request.resource.data;
+      let isOwner = post.uid == request.auth.uid;
+      let isNow = request.time == request.resource.data.createdAt;
+      let hasRequiredFields = post.keys().hasAll(['content', 'uid', 'createdAt', 'published'])
+
+      return isNow && isOwner && hasRequiredFields;
+    }
+
+    function isValidUpdatedPost() {
+      let post = request.resource.data;
+      let hasRequiredFields = post.keys().hasAny(['content', 'published', 'published']);
+      let isValidContent = post.content is String && post.content.size() < 5000;
+
+      return hasRequiredFields && isValidContent;
+    }
+
+    function hasAnyRole(roles) {
+      let user = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return isLoggedIn() && user.data.roles.hasAny(roles)
+    }
+
+    function canCreateMsg() {
+      let isOwner = request.auth.uid == request.resource.data.uid;
+      let isNotTooLong = request.resource.data.text.size() < 255;
+      let isNow = request.time == request.resource.data.createdAt;
+      let isNotBanned = exists(
+        /databases/$(database)/documents/banned/$(request.auth.uid)
+        ) == false;
+
+      return isLoggedIn() && isOwner && isNotTooLong && isNow && isNotBanned;
+    }
+
+    // better readability, reusability
+    // define functions at the root of rules
+    function isLoggedIn() {
+      return request.auth.uid != null;
+    }
+
+    function belongsTo(userId) {
+      return request.auth.uid == userId || request.auth.uid == resource.data.uid;
+    }
+
+    function canCreateTodo() {
+      let uid = request.auth.uid;
+      let hasValidTimestamp = request.time == request.resource.data.createdAt;
+
+      return belongsTo(uid) && hasValidTimestamp;
+    }
+
+    function hasProfile(userId) {
+      
+      return exists(/databases/$(database)/documents/users/$(userId))
+    }
+
+    function isAdmin(userId) {
+      let profile = get(/databases/$(database/documents/users/$(userId)));
+      return profile.data.admin == true;
+    }
+  }
+}
